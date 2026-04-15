@@ -1,6 +1,6 @@
 import { Polyline, register, subStyleProps } from '@antv/g6'
 import type { Point, PolylineStyleProps } from '@antv/g6'
-import type { Path } from '@antv/g'
+import type { IAnimation, Path } from '@antv/g'
 import type { Group } from '@antv/g'
 
 // ── 类型定义 ──────────────────────────────────────────────
@@ -40,9 +40,8 @@ type ParsedLabelEdgeStyleProps = Required<PolylineStyleProps> & {
 // ── TraceEdge ─────────────────────────────────────────────
 
 export class TraceEdge extends Polyline {
-  private _flowAnim: Animation | null = null
-  private _glowAnim: Animation | null = null
-  private _animTimer: ReturnType<typeof setTimeout> | null = null
+  private _flowAnim: IAnimation | null = null
+  private _glowAnim: IAnimation | null = null
 
   // ── 几何工具 ──────────────────────────────────────────
 
@@ -67,6 +66,7 @@ export class TraceEdge extends Polyline {
   ): [Point, Point] {
     const d0 = this.manhattanDistance(prevPoint, midPoint)
     const d1 = this.manhattanDistance(nextPoint, midPoint)
+    if (d0 === 0 || d1 === 0) return [midPoint, midPoint]
     const r = Math.min(radius, Math.min(d0, d1) / 2)
 
     const ps: Point = [
@@ -149,17 +149,19 @@ export class TraceEdge extends Polyline {
     // fallback: getBounds
     const bbox = node.getBounds()
     const pad = padding
+    const min: Point = [bbox.min[0] - pad, bbox.min[1] - pad]
+    const max: Point = [bbox.max[0] + pad, bbox.max[1] + pad]
     return {
-      min: [bbox.min[0] - pad, bbox.min[1] - pad],
-      max: [bbox.max[0] + pad, bbox.max[1] + pad],
+      min,
+      max,
       center: [bbox.center[0], bbox.center[1]],
       width: bbox.max[0] - bbox.min[0] + pad * 2,
       height: bbox.max[1] - bbox.min[1] + pad * 2,
       intersects: (other) =>
-        !(bbox.max[0] + pad < other.min[0] - pad ||
-          bbox.min[0] - pad > other.max[0] + pad ||
-          bbox.max[1] + pad < other.min[1] - pad ||
-          bbox.min[1] - pad > other.max[1] + pad),
+        !(max[0] < other.min[0] ||
+          min[0] > other.max[0] ||
+          max[1] < other.min[1] ||
+          min[1] > other.max[1]),
     }
   }
 
@@ -267,6 +269,16 @@ export class TraceEdge extends Polyline {
     return pathArray
   }
 
+  private retreatPoint(from: Point, to: Point, distance: number): Point {
+    if (!(distance > 0)) return to
+    const dx = to[0] - from[0]
+    const dy = to[1] - from[1]
+    const len = Math.hypot(dx, dy)
+    if (!Number.isFinite(len) || len <= 1e-6) return to
+    const ratio = Math.max(0, Math.min(1, (len - distance) / len))
+    return [from[0] + dx * ratio, from[1] + dy * ratio]
+  }
+
   // ── 路径计算（正交模式或默认折线） ───────────────────
 
   protected getKeyPath(attributes: any): any {
@@ -276,7 +288,7 @@ export class TraceEdge extends Polyline {
       return super.getKeyPath(attributes)
     }
 
-    const [sourcePoint, targetPoint] = this.getEndpoints(attributes, false)
+    const [rawSourcePoint, rawTargetPoint] = this.getEndpoints(attributes, false)
     const padding = orthPathConfig.padding ?? 10
     const radius = orthPathConfig.radius ?? 0
     const { sourceNode, targetNode } = this
@@ -309,8 +321,8 @@ export class TraceEdge extends Polyline {
     )
 
     const controlPoints = this.calculateControlPoints(
-      sourcePoint,
-      targetPoint,
+      rawSourcePoint,
+      rawTargetPoint,
       sourceBBox,
       targetBBox,
       direction,
@@ -319,7 +331,20 @@ export class TraceEdge extends Polyline {
       secondOffsetRatio,
     )
 
+    const [sourcePoint, targetPoint] = this.getEndpoints(attributes, true, controlPoints)
     const points: Point[] = [sourcePoint, ...controlPoints, targetPoint]
+
+    const startGap = Math.max(0, Number(attributes.startArrowOffset ?? 0))
+    const endGap = Math.max(0, Number(attributes.endArrowOffset ?? 0))
+
+    if (startGap > 0 && points.length > 1) {
+      points[0] = this.retreatPoint(points[1], points[0], startGap)
+    }
+    if (endGap > 0 && points.length > 1) {
+      const n = points.length
+      points[n - 1] = this.retreatPoint(points[n - 2], points[n - 1], endGap)
+    }
+
     const pathArray = this.buildPathArray(points, radius, sourcePoint, targetPoint)
 
     if (pathArray.length === 0) return super.getKeyPath(attributes)
@@ -334,11 +359,17 @@ export class TraceEdge extends Polyline {
     type: 'start' | 'end',
   ) {
     const key = type === 'start' ? 'startLabel' : 'endLabel'
-    const [x, y] = this.getEndpoints(attributes)[type === 'start' ? 0 : 1]
+    const keyShape = this.shapeMap['key'] as Path | undefined
+    const middlePoint = keyShape?.getPoint?.(0.5) as any
+    const [sourcePoint, targetPoint] = this.getEndpoints(attributes)
+    const mx = Array.isArray(middlePoint) ? middlePoint[0] : middlePoint?.x
+    const my = Array.isArray(middlePoint) ? middlePoint[1] : middlePoint?.y
+    const x = typeof mx === 'number' ? mx : (sourcePoint[0] + targetPoint[0]) / 2
+    const y = typeof my === 'number' ? my : (sourcePoint[1] + targetPoint[1]) / 2
 
     const style = subStyleProps(attributes, key) as any
-    const offsetY = style.offsetY ?? -20
-    const offsetX = style.offsetX ?? (type === 'start' ? 50 : -50)
+    const offsetY = style.offsetY ?? 0
+    const offsetX = style.offsetX ?? 0
     const text = style.text
 
     this.upsert(
@@ -351,7 +382,7 @@ export class TraceEdge extends Polyline {
         fontSize: 14,
         fill: '#8AB5D4',
         textBaseline: 'middle',
-        textAlign: type,
+        textAlign: 'center',
         ...style,
       } : false,
       container,
@@ -370,7 +401,7 @@ export class TraceEdge extends Polyline {
       const anim = keyShape.animate(
         [{ lineDashOffset: 0 }, { lineDashOffset: -12 }],
         { duration: 700, iterations: Infinity, easing: 'linear' },
-      ) as Animation | null
+      ) as IAnimation | null
       if (anim) this._flowAnim = anim
     }
 
@@ -382,25 +413,45 @@ export class TraceEdge extends Polyline {
           { strokeOpacity: 0.55 },
         ],
         { duration: 2400, iterations: Infinity, easing: 'ease-in-out' },
-      ) as Animation | null
+      ) as IAnimation | null
       if (anim) this._glowAnim = anim
     }
   }
 
-  // ── 主渲染入口 ────────────────────────────────────────
+  private stopAnimation(anim: IAnimation | null) {
+    if (!anim) return
+    try {
+      anim.finish?.()
+    } catch {
+      // ignore
+    }
+    try {
+      anim.cancel?.()
+    } catch {
+      // ignore
+    }
+  }
 
+  private cleanupAnimations() {
+    this.stopAnimation(this._flowAnim)
+    this.stopAnimation(this._glowAnim)
+    this._flowAnim = null
+    this._glowAnim = null
+  }
+
+  onCreate() {
+    this.startFlowAnimation()
+  }
+
+  onDestroy() {
+    this.cleanupAnimations()
+  }
+
+  // ── 主渲染入口 ────────────────────────────────────────
   render(attributes: ParsedLabelEdgeStyleProps, container: Group) {
     super.render(attributes, container)
     this.drawLabel(attributes, container, 'start')
     this.drawLabel(attributes, container, 'end')
-
-    // shape 挂载到 canvas 后才能调用 animate()，延迟执行
-    if (!this._flowAnim && !this._animTimer) {
-      this._animTimer = setTimeout(() => {
-        this._animTimer = null
-        this.startFlowAnimation()
-      }, 50)
-    }
   }
 }
 

@@ -1,19 +1,14 @@
 import { ref, onUnmounted } from 'vue'
 import { Graph } from '@antv/g6'
 import '../edges/TraceEdge'
+import '../edges/FlowEdge'
 import '../nodes/FlowNode'
+import { formatAmount } from '../utils/number'
 
 export type LayoutType = 'dagre' | 'circular'
 
 interface InitGraphOptions {
   onContextMenu?: (nodeId: string, clientX: number, clientY: number, direction: string) => void
-}
-
-function formatAmount(amount: number): string {
-  if (!amount) return ''
-  if (amount >= 1e8) return (amount / 1e8).toFixed(2) + '亿'
-  if (amount >= 1e4) return (amount / 1e4).toFixed(2) + '万'
-  return amount.toFixed(2)
 }
 
 function amountToLineWidth(amount: number): number {
@@ -254,7 +249,8 @@ export function useFundFlowGraph() {
         state: {
           highlighted: {
             stroke: '#f59e0b',
-            lineWidth: 2.5,
+            endArrowFill: '#f59e0b',
+            endArrowStroke: '#f59e0b',
             shadowColor: '#f59e0b',
             shadowBlur: 12,
           },
@@ -265,19 +261,20 @@ export function useFundFlowGraph() {
           endArrowFill: '#22d3ee',
           endArrowStroke: '#22d3ee',
           lineWidth: (d: any) => amountToLineWidth(d.data?.amount ?? 0),
-          endArrowSize: (d: any) => 6 + amountToLineWidth(d.data?.amount ?? 0) * 1.5,
+          endArrowSize: (d: any) => 6 + amountToLineWidth(d.data?.amount ?? 0),
+          endArrowOffset: (d: any) => 0 + amountToLineWidth(d.data?.amount ?? 0),
           startLabelText: (d: any) => {
             if (d.__direction === 'left') {
               const amount = d.data.amount
               const txCount = d.data.txCount
-              return `${txCount}笔\n${amount}`
+              return `${txCount}笔\n${formatAmount(amount)}`
             }
           },
           endLabelText: (d: any) => {
             if (d.__direction === 'right') {
               const amount = d.data.amount
               const txCount = d.data.txCount
-              return `${txCount}笔\n${amount}`
+              return `${txCount}笔\n${formatAmount(amount)}`
             }
           },
           // labelText: (d: any) => formatAmount(d.data.amount),

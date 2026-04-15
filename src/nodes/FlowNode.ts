@@ -1,5 +1,5 @@
 import { Rect as G6Rect, register } from '@antv/g6'
-import { Image as GImage, Circle as GCircle, Text as GText, Rect as GRect } from '@antv/g'
+import { Image as GImage, Circle as GCircle, Text as GText, Rect as GRect, Path as GPath } from '@antv/g'
 import type { Group } from '@antv/g'
 import type { RectStyleProps } from '@antv/g6'
 
@@ -7,6 +7,9 @@ const NODE_W = 200
 const ICON_SIZE = 16
 const BTN_R = 9
 const RISK_R = 5
+const BTN_OFFSET = 8
+const TOGGLE_GLYPH_HALF = 3.8
+const TOGGLE_GLYPH_STROKE = 1.8
 
 const ICON_SRC: Record<number, string> = {
   0: '/graph/user.svg',
@@ -25,6 +28,20 @@ const THEME = {
 function shortAddr(address: string): string {
   if (!address || address.length <= 12) return address
   return address.slice(0, 6) + '…' + address.slice(-4)
+}
+
+function getToggleGlyphPath(x: number, y: number, collapsed: boolean) {
+  const d: any[] = [
+    ['M', x - TOGGLE_GLYPH_HALF, y],
+    ['L', x + TOGGLE_GLYPH_HALF, y],
+  ]
+  if (collapsed) {
+    d.push(
+      ['M', x, y - TOGGLE_GLYPH_HALF],
+      ['L', x, y + TOGGLE_GLYPH_HALF],
+    )
+  }
+  return d
 }
 
 export class FlowNode extends G6Rect {
@@ -94,12 +111,14 @@ export class FlowNode extends G6Rect {
     // 5. 展开/折叠按钮（level >= 2 为叶子节点，不显示）
     const showRight = level < 2 && (direction === 'right' || direction === 'center')
     const showLeft  = level < 2 && (direction === 'left'  || direction === 'center')
+    const rightCollapsed = collapsedRight === true
+    const leftCollapsed = collapsedLeft === true
 
     // 右侧按钮：图标由 collapsedRight 独立决定
     this.upsert('toggle-btn-right-bg', GCircle,
       showRight ? {
         r: BTN_R,
-        cx: w / 2,
+        cx: w / 2 + BTN_OFFSET,
         cy: 0,
         fill: '#0f2040',
         stroke: t.stroke,
@@ -108,16 +127,13 @@ export class FlowNode extends G6Rect {
       } as any : false,
       container,
     )
-    this.upsert('toggle-btn-right-text', GText,
+    this.upsert('toggle-btn-right-icon', GPath,
       showRight ? {
-        text: collapsedRight === true ? '+' : '−',
-        fill: t.stroke,
-        fontSize: 13,
-        fontWeight: 'bold',
-        textAlign: 'center',
-        textBaseline: 'middle',
-        x: w / 2,
-        y: 0,
+        d: getToggleGlyphPath(w / 2 + BTN_OFFSET, 0, rightCollapsed),
+        stroke: t.stroke,
+        lineWidth: TOGGLE_GLYPH_STROKE,
+        lineCap: 'round',
+        lineJoin: 'round',
         pointerEvents: 'none',
       } as any : false,
       container,
@@ -127,7 +143,7 @@ export class FlowNode extends G6Rect {
     this.upsert('toggle-btn-left-bg', GCircle,
       showLeft ? {
         r: BTN_R,
-        cx: -w / 2,
+        cx: -w / 2 - BTN_OFFSET,
         cy: 0,
         fill: '#0f2040',
         stroke: t.stroke,
@@ -136,16 +152,13 @@ export class FlowNode extends G6Rect {
       } as any : false,
       container,
     )
-    this.upsert('toggle-btn-left-text', GText,
+    this.upsert('toggle-btn-left-icon', GPath,
       showLeft ? {
-        text: collapsedLeft === true ? '+' : '−',
-        fill: t.stroke,
-        fontSize: 13,
-        fontWeight: 'bold',
-        textAlign: 'center',
-        textBaseline: 'middle',
-        x: -w / 2,
-        y: 0,
+        d: getToggleGlyphPath(-w / 2 - BTN_OFFSET, 0, leftCollapsed),
+        stroke: t.stroke,
+        lineWidth: TOGGLE_GLYPH_STROKE,
+        lineCap: 'round',
+        lineJoin: 'round',
         pointerEvents: 'none',
       } as any : false,
       container,
