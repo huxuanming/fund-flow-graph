@@ -1,5 +1,6 @@
 import { ref, onUnmounted } from 'vue'
 import { Graph } from '@antv/g6'
+import dagre from 'dagre'
 import '../edges/TraceEdge'
 import '../edges/FlowEdge'
 import '../nodes/FlowNode'
@@ -51,6 +52,13 @@ export function useFundFlowGraph() {
 
   // 数据中 hidden:true 的节点 ID（初始隐藏集合）
   let initiallyHiddenIds: string[] = []
+  const initiallyHiddenPositions = new Map<string, [number, number]>()
+  const LOCAL_RANK_GAP = 180
+  const LOCAL_NODE_GAP = 72
+  const LOCAL_NODE_W = 200
+  const LOCAL_NODE_H = 56
+  const LOCAL_COLLIDE_PAD_X = 18
+  const LOCAL_COLLIDE_PAD_Y = 12
 
   // ── 折叠/展开 ──────────────────────────────────────────
 
@@ -233,6 +241,9 @@ export function useFundFlowGraph() {
   ) {
     if (graphInstance) return
 
+    // 先隐藏容器，避免“先显示再隐藏”的首屏闪烁
+    container.style.visibility = 'hidden'
+
     graphInstance = new Graph({
       container,
       autoFit: 'center',
@@ -337,6 +348,16 @@ export function useFundFlowGraph() {
         .filter(n => n.data?.hidden === true)
         .map(n => n.id as string)
 
+      initiallyHiddenPositions.clear()
+      for (const id of initiallyHiddenIds) {
+        try {
+          const p = graphInstance.getElementPosition(id as string)
+          initiallyHiddenPositions.set(id, [p[0], p[1]])
+        } catch {
+          // ignore
+        }
+      }
+
       if (initiallyHiddenIds.length > 0) {
         const hiddenSet = new Set(initiallyHiddenIds)
         const edgeIds = graphInstance
@@ -344,9 +365,11 @@ export function useFundFlowGraph() {
           .filter(e => hiddenSet.has(e.source as string) || hiddenSet.has(e.target as string))
           .map(e => e.id as string)
           .filter(Boolean)
-        await graphInstance.hideElement([...initiallyHiddenIds, ...edgeIds])
+        await graphInstance.hideElement([...initiallyHiddenIds, ...edgeIds], false)
         await syncEdgeVisibility()
       }
+    }).finally(() => {
+      container.style.visibility = ''
     })
 
     // +/- 折叠按钮点击
@@ -418,6 +441,261 @@ export function useFundFlowGraph() {
     if (toShow.length) await graphInstance.showElement(toShow)
   }
 
+  function getNodeLevel(nodeId: string): number {
+    if (!graphInstance) return 0
+    return (graphInstance.getNodeData(nodeId)?.data?.level as number) ?? 0
+  }
+
+  function getNodeDirection(nodeId: string): 'left' | 'right' | 'center' {
+    if (!graphInstance) return 'center'
+    const v = graphInstance.getNodeData(nodeId)?.data?.direction as string | undefined
+    if (v === 'left' || v === 'right' || v === 'center') return v
+    return 'center'
+  }
+
+  function getChildrenByLevel(nodeId: string): string[] {
+    if (!graphInstance) return []
+    const selfLevel = getNodeLevel(nodeId)
+    return graphInstance
+      .getRelatedEdgesData(nodeId, 'both')
+      .map(e => (e.source === nodeId ? e.target : e.source) as string)
+      .filter(id => getNodeLevel(id) > selfLevel)
+  }
+
+  function computeHiddenLocalPositions(hiddenIds: string[]): Record<string, [number, number]> {
+    if (!graphInstance || hiddenIds.length === 0) return {}
+
+    const hiddenSet = new Set(hiddenIds)
+    const positions: Record<string, [number, number]> = {}
+    type ComponentLayout = {
+      rootId: string
+      parentId: string | null
+      dir: 'left' | 'right' | 'center'
+      nodeIds: string[]
+      nodeXY: Record<string, [number, number]>
+      rootXY: [number, number]
+      minY: number
+      maxY: number
+    }
+    const components: ComponentLayout[] = []
+    type Box = { minX: number; maxX: number; minY: number; maxY: number }
+
+    const getNodeBoxSize = (id: string): { w: number; h: number } => {
+      const d = getNodeDirection(id)
+      return { w: LOCAL_NODE_W, h: d === 'center' ? 64 : LOCAL_NODE_H }
+    }
+
+    const makeBox = (x: number, y: number, w: number, h: number): Box => ({
+      minX: x - w / 2 - LOCAL_COLLIDE_PAD_X,
+      maxX: x + w / 2 + LOCAL_COLLIDE_PAD_X,
+      minY: y - h / 2 - LOCAL_COLLIDE_PAD_Y,
+      maxY: y + h / 2 + LOCAL_COLLIDE_PAD_Y,
+    })
+
+    const overlap = (a: Box, b: Box): boolean =>
+      !(a.maxX < b.minX || a.minX > b.maxX || a.maxY < b.minY || a.minY > b.maxY)
+
+    const parentMap = new Map<string, string | null>()
+    for (const id of hiddenIds) {
+      const level = getNodeLevel(id)
+      const related = graphInstance.getRelatedEdgesData(id, 'both')
+      let pickedParent: string | null = null
+      let pickedLevel = -Infinity
+      for (const e of related) {
+        const neighborId = (e.source === id ? e.target : e.source) as string
+        const lv = getNodeLevel(neighborId)
+        if (lv < level && lv > pickedLevel) {
+          pickedParent = neighborId
+          pickedLevel = lv
+        }
+      }
+      parentMap.set(id, pickedParent)
+    }
+
+    const roots = hiddenIds.filter(id => {
+      const p = parentMap.get(id)
+      return !p || !hiddenSet.has(p)
+    })
+
+    const assigned = new Set<string>()
+    for (const rootId of roots) {
+      const parentId = parentMap.get(rootId) ?? null
+      const componentNodes: string[] = []
+      const queue = [rootId]
+      while (queue.length > 0) {
+        const current = queue.shift()!
+        if (assigned.has(current)) continue
+        assigned.add(current)
+        componentNodes.push(current)
+        for (const child of getChildrenByLevel(current)) {
+          if (hiddenSet.has(child) && !assigned.has(child)) queue.push(child)
+        }
+      }
+      if (componentNodes.length === 0) continue
+
+      const dir = getNodeDirection(rootId)
+      const rankdir = dir === 'left' ? 'RL' : 'LR'
+      const g = new dagre.graphlib.Graph({ directed: true, multigraph: true, compound: false })
+      g.setGraph({ rankdir, nodesep: LOCAL_NODE_GAP, ranksep: LOCAL_RANK_GAP, marginx: 0, marginy: 0 })
+      g.setDefaultEdgeLabel(() => ({}))
+
+      for (const id of componentNodes) {
+        const h = getNodeDirection(id) === 'center' ? 64 : LOCAL_NODE_H
+        g.setNode(id, { width: LOCAL_NODE_W, height: h })
+      }
+
+      const nodeSet = new Set(componentNodes)
+      const componentEdges = graphInstance
+        .getEdgeData()
+        .filter(e => nodeSet.has(e.source as string) && nodeSet.has(e.target as string))
+
+      for (const e of componentEdges) {
+        const src = e.source as string
+        const tgt = e.target as string
+        const sLv = getNodeLevel(src)
+        const tLv = getNodeLevel(tgt)
+        const from = sLv <= tLv ? src : tgt
+        const to = sLv <= tLv ? tgt : src
+        const edgeId = (e.id as string) || `${from}->${to}`
+        g.setEdge(from, to, { minlen: 1, weight: 1 }, edgeId)
+      }
+
+      dagre.layout(g)
+
+      const rootLayout = g.node(rootId)
+      if (!rootLayout) continue
+
+      let minY = Number.POSITIVE_INFINITY
+      let maxY = Number.NEGATIVE_INFINITY
+      const nodeXY: Record<string, [number, number]> = {}
+      for (const id of componentNodes) {
+        const n = g.node(id)
+        if (!n) continue
+        nodeXY[id] = [n.x, n.y]
+        const h = getNodeDirection(id) === 'center' ? 64 : LOCAL_NODE_H
+        minY = Math.min(minY, n.y - h / 2)
+        maxY = Math.max(maxY, n.y + h / 2)
+      }
+      if (!Number.isFinite(minY) || !Number.isFinite(maxY)) continue
+
+      components.push({
+        rootId,
+        parentId,
+        dir,
+        nodeIds: componentNodes,
+        nodeXY,
+        rootXY: [rootLayout.x, rootLayout.y],
+        minY,
+        maxY,
+      })
+    }
+
+    // 同一父节点下的多个隐藏子树，按组件高度做垂直打包，避免重叠
+    const groups = new Map<string, ComponentLayout[]>()
+    for (const comp of components) {
+      const key = `${comp.parentId ?? '__orphan__'}::${comp.dir}`
+      const list = groups.get(key) ?? []
+      list.push(comp)
+      groups.set(key, list)
+    }
+
+    for (const [key, comps] of groups.entries()) {
+      const [parentKey] = key.split('::')
+      comps.sort((a, b) => String(a.rootId).localeCompare(String(b.rootId)))
+
+      // 当前已显示节点作为静态障碍物，局部布局结果必须避开这些节点
+      const obstacleBoxes: Box[] = []
+      for (const node of graphInstance.getNodeData()) {
+        const id = node.id as string
+        if (!id || hiddenSet.has(id)) continue
+        const style = graphInstance.getElementRenderStyle(id) as any
+        if (style?.visibility === 'hidden') continue
+        const p = graphInstance.getElementPosition(id) as [number, number]
+        const { w, h } = getNodeBoxSize(id)
+        obstacleBoxes.push(makeBox(p[0], p[1], w, h))
+      }
+
+      let baseY = 0
+      if (parentKey !== '__orphan__') {
+        const p = graphInstance.getElementPosition(parentKey) as [number, number]
+        baseY = p[1]
+      } else {
+        const ys = comps.map(c => (initiallyHiddenPositions.get(c.rootId) ?? [0, c.rootXY[1]])[1])
+        baseY = ys.reduce((sum, y) => sum + y, 0) / Math.max(ys.length, 1)
+      }
+
+      const heights = comps.map(c => c.maxY - c.minY)
+      const gap = LOCAL_NODE_GAP
+      const totalHeight = heights.reduce((s, h) => s + h, 0) + gap * Math.max(0, comps.length - 1)
+      let cursorTop = baseY - totalHeight / 2
+
+      for (let i = 0; i < comps.length; i++) {
+        const comp = comps[i]
+        const compHeight = heights[i]
+        const targetMinY = cursorTop
+
+        let targetRootX: number
+        if (comp.parentId) {
+          const parentPos = graphInstance.getElementPosition(comp.parentId) as [number, number]
+          const sign = comp.dir === 'left' ? -1 : 1
+          targetRootX = parentPos[0] + sign * LOCAL_RANK_GAP
+        } else {
+          targetRootX = initiallyHiddenPositions.get(comp.rootId)?.[0] ?? comp.rootXY[0]
+        }
+
+        const dx = targetRootX - comp.rootXY[0]
+        const dy = targetMinY - comp.minY
+        const candidate = comp.nodeIds
+          .map(id => {
+            const xy = comp.nodeXY[id]
+            if (!xy) return null
+            const { w, h } = getNodeBoxSize(id)
+            return { id, x: xy[0] + dx, y: xy[1] + dy, w, h }
+          })
+          .filter(Boolean) as Array<{ id: string; x: number; y: number; w: number; h: number }>
+
+        const hasCollision = (extraDy: number) => {
+          for (const n of candidate) {
+            const box = makeBox(n.x, n.y + extraDy, n.w, n.h)
+            for (const obstacle of obstacleBoxes) {
+              if (overlap(box, obstacle)) return true
+            }
+          }
+          return false
+        }
+
+        let extraDy = 0
+        if (hasCollision(0)) {
+          const step = Math.max(LOCAL_NODE_GAP / 2, 24)
+          for (let k = 1; k <= 120; k++) {
+            const down = step * k
+            if (!hasCollision(down)) {
+              extraDy = down
+              break
+            }
+            const up = -step * k
+            if (!hasCollision(up)) {
+              extraDy = up
+              break
+            }
+          }
+        }
+
+        for (const id of comp.nodeIds) {
+          const xy = comp.nodeXY[id]
+          if (!xy) continue
+          positions[id] = [xy[0] + dx, xy[1] + dy + extraDy]
+          const { w, h } = getNodeBoxSize(id)
+          obstacleBoxes.push(makeBox(positions[id][0], positions[id][1], w, h))
+        }
+
+        cursorTop += compHeight + gap
+      }
+    }
+
+    return positions
+  }
+
   function collectNodeStates() {
     if (!graphInstance) return []
     return graphInstance.getNodeData().map(n => {
@@ -457,9 +735,13 @@ export function useFundFlowGraph() {
 
     const all = [...initiallyHiddenIds, ...edgeIds]
     if (show) {
-      await graphInstance.showElement(all)
+      const positions = computeHiddenLocalPositions(initiallyHiddenIds)
+      if (Object.keys(positions).length > 0) {
+        await graphInstance.translateElementTo(positions, false)
+      }
+      await graphInstance.showElement(all, false)
     } else {
-      await graphInstance.hideElement(all)
+      await graphInstance.hideElement(all, false)
     }
     await syncEdgeVisibility()
   }
