@@ -2,20 +2,46 @@
 import { ref, onMounted } from 'vue'
 import { useFundFlowGraph } from '../composables/useFundFlowGraph'
 import LayoutToggle from './LayoutToggle.vue'
+import NodeContextMenu from './NodeContextMenu.vue'
 import rawData from '../data/data1.json'
 
 const nodes = rawData.nodes
-const edges = rawData.edges.map((e: any, i: number) => ({
-  id: `edge-${i}`,
-  ...e,
-}))
+const nodeMap = new Map(nodes.map((n: any) => [n.id, n]))
+const edges = rawData.edges.map((e: any, i: number) => {
+  const srcNode = nodeMap.get(e.source) as any
+  const tgtNode = nodeMap.get(e.target) as any
+  let direction = 'center'
+  if (tgtNode?.data?.direction === 'right') direction = 'right'
+  else if (srcNode?.data?.direction === 'left') direction = 'left'
+  return {
+    id: `edge-${i}`,
+    __direction: direction,
+    ...e,
+  }
+})
 
 const graphContainer = ref<HTMLElement | null>(null)
-const { currentLayout, isTransitioning, initGraph, switchLayout } = useFundFlowGraph()
+const { currentLayout, isTransitioning, initGraph, switchLayout, hideNode, highlightPath, logVisibleNodes, showHiddenNodes, toggleHiddenNodes } =
+  useFundFlowGraph()
+
+const ctxMenu = ref({ visible: false, x: 0, y: 0, nodeId: '', isCenter: false })
+function closeCtxMenu() {
+  ctxMenu.value.visible = false
+}
 
 onMounted(() => {
   if (graphContainer.value) {
-    initGraph(graphContainer.value, nodes, edges)
+    initGraph(graphContainer.value, nodes, edges, {
+      onContextMenu: (nodeId, clientX, clientY, direction) => {
+        ctxMenu.value = {
+          visible: true,
+          x: clientX,
+          y: clientY,
+          nodeId,
+          isCenter: direction === 'center',
+        }
+      },
+    })
   }
 })
 </script>
@@ -29,11 +55,25 @@ onMounted(() => {
           {{ nodes.length }} 个地址 · {{ edges.length }} 笔交易
         </p>
       </div>
-      <LayoutToggle
-        :current-layout="currentLayout"
-        :is-transitioning="isTransitioning"
-        @switch="switchLayout"
-      />
+      <div class="toolbar-right">
+        <label class="hidden-switch">
+          <input
+            type="checkbox"
+            :checked="showHiddenNodes"
+            @change="toggleHiddenNodes(($event.target as HTMLInputElement).checked)"
+          />
+          <span class="switch-track">
+            <span class="switch-thumb"></span>
+          </span>
+          <span class="switch-label">显示隐藏节点</span>
+        </label>
+        <button class="log-btn" @click="logVisibleNodes">输出节点</button>
+        <LayoutToggle
+          :current-layout="currentLayout"
+          :is-transitioning="isTransitioning"
+          @switch="switchLayout"
+        />
+      </div>
     </div>
 
     <div class="graph-legend">
@@ -55,7 +95,17 @@ onMounted(() => {
       </div>
     </div>
 
-    <div ref="graphContainer" class="graph-canvas"></div>
+    <div ref="graphContainer" class="graph-canvas" @contextmenu.prevent></div>
+
+    <NodeContextMenu
+      v-if="ctxMenu.visible"
+      :x="ctxMenu.x"
+      :y="ctxMenu.y"
+      :is-center="ctxMenu.isCenter"
+      @hide="hideNode(ctxMenu.nodeId); closeCtxMenu()"
+      @highlight="highlightPath(ctxMenu.nodeId); closeCtxMenu()"
+      @close="closeCtxMenu()"
+    />
 
     <transition name="fade">
       <div v-if="isTransitioning" class="graph-loading">
@@ -147,6 +197,83 @@ onMounted(() => {
   background: #1e3a5f;
   border-color: #3b82f6;
   box-shadow: 0 0 6px #3b82f666;
+}
+
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.hidden-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.hidden-switch input {
+  display: none;
+}
+
+.switch-track {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  background: #0f2040;
+  border: 1px solid rgba(34, 211, 238, 0.3);
+  border-radius: 10px;
+  transition: background 0.2s, border-color 0.2s;
+  flex-shrink: 0;
+}
+
+.hidden-switch input:checked + .switch-track {
+  background: rgba(34, 211, 238, 0.2);
+  border-color: rgba(34, 211, 238, 0.7);
+}
+
+.switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #475569;
+  transition: transform 0.2s, background 0.2s;
+}
+
+.hidden-switch input:checked + .switch-track .switch-thumb {
+  transform: translateX(16px);
+  background: #22d3ee;
+}
+
+.switch-label {
+  font-size: 12px;
+  color: #475569;
+  transition: color 0.2s;
+}
+
+.hidden-switch:has(input:checked) .switch-label {
+  color: #22d3ee;
+}
+
+.log-btn {
+  padding: 6px 14px;
+  font-size: 12px;
+  color: #22d3ee;
+  background: transparent;
+  border: 1px solid rgba(34, 211, 238, 0.3);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  letter-spacing: 0.03em;
+}
+
+.log-btn:hover {
+  background: rgba(34, 211, 238, 0.08);
+  border-color: rgba(34, 211, 238, 0.6);
 }
 
 .graph-canvas {
