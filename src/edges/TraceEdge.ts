@@ -194,6 +194,18 @@ export class TraceEdge extends Polyline {
       }
     }
 
+    // source 在 target 右侧时，采用“绕到 target 左侧再进入”的路径，
+    // 保证最后一段是从左向右指向 target。
+    if (sx > tx) {
+      const sourceMinX = sourceBBox.min[0] ?? sx
+      const targetMinX = targetBBox.min[0] ?? tx
+      const detourGap = Math.max(24, Math.min(sourceBBox.width, targetBBox.width) * 0.2)
+      const approachX = targetMinX - detourGap
+      const bypassX = Math.min(approachX - detourGap, sourceMinX - detourGap)
+
+      return [[bypassX, sy], [bypassX, ty], [approachX, ty]]
+    }
+
     if (isHorizontal) {
       const sourceMaxX = sourceBBox.max[0] ?? 0
       const targetMinX = targetBBox.min[0] ?? 0
@@ -360,7 +372,7 @@ export class TraceEdge extends Polyline {
   ) {
     const key = type === 'start' ? 'startLabel' : 'endLabel'
     const keyShape = this.shapeMap['key'] as Path | undefined
-    const middlePoint = keyShape?.getPoint?.(0.5) as any
+    const middlePoint = type === 'start' ? keyShape?.getPoint?.(0.2) : keyShape?.getPoint(0.8)
     const [sourcePoint, targetPoint] = this.getEndpoints(attributes)
     const mx = Array.isArray(middlePoint) ? middlePoint[0] : middlePoint?.x
     const my = Array.isArray(middlePoint) ? middlePoint[1] : middlePoint?.y
@@ -377,7 +389,7 @@ export class TraceEdge extends Polyline {
       'text' as any,
       text ? {
         x,
-        y: y! + offsetY,
+        y,
         dx: offsetX,
         fontSize: 14,
         fill: '#8AB5D4',

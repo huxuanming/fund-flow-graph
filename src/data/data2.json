@@ -1,0 +1,26 @@
+{
+	"nodes": [
+			{
+					"id": "a7897f541e9058462831dde19252f76a18aa974b76b9bf909f154e7ef61aa2a3",
+					"data": {
+							"label": "",
+							"labelType": 0,
+							"riskScore": 0.0,
+							"address": "bc1qnezdh4zn9psg7yees407atdr836ntpl97ngs35",
+							"timestamp": "1776325196972",
+							"direction": "center",
+							"level": 0
+					}
+			}
+	],
+	"edges": [
+	],
+	"vertex": {
+			"vertexId": "bc1qnezdh4zn9psg7yees407atdr836ntpl97ngs35",
+			"label": "",
+			"labelType": 0,
+			"riskScore": 0.0,
+			"timestamp": "1776325196972",
+			"uniqueId": "a7897f541e9058462831dde19252f76a18aa974b76b9bf909f154e7ef61aa2a3"
+	}
+}

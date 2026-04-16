@@ -3,7 +3,7 @@ import { ref, onMounted } from 'vue'
 import { useFundFlowGraph } from '../composables/useFundFlowGraph'
 import LayoutToggle from './LayoutToggle.vue'
 import NodeContextMenu from './NodeContextMenu.vue'
-import rawData from '../data/data1.json'
+import rawData from '../data/data2.json'
 
 const nodes = rawData.nodes
 const nodeMap = new Map(nodes.map((n: any) => [n.id, n]))
@@ -21,12 +21,33 @@ const edges = rawData.edges.map((e: any, i: number) => {
 })
 
 const graphContainer = ref<HTMLElement | null>(null)
-const { currentLayout, isTransitioning, initGraph, switchLayout, hideNode, highlightPath, logVisibleNodes, showHiddenNodes, toggleHiddenNodes } =
+const {
+  currentLayout,
+  isTransitioning,
+  initGraph,
+  switchLayout,
+  hideNode,
+  highlightPath,
+  logVisibleNodes,
+  showHiddenNodes,
+  toggleHiddenNodes,
+  addElementToCanvas,
+} =
   useFundFlowGraph()
+const nodeCount = ref(nodes.length)
+const edgeCount = ref(edges.length)
 
 const ctxMenu = ref({ visible: false, x: 0, y: 0, nodeId: '', isCenter: false })
 function closeCtxMenu() {
   ctxMenu.value.visible = false
+}
+
+async function handleAddElement() {
+  const added = await addElementToCanvas()
+  if (!added) return
+  const c = added.addedCount ?? added.nodeIds?.length ?? 0
+  nodeCount.value += c
+  edgeCount.value += c
 }
 
 onMounted(() => {
@@ -52,7 +73,7 @@ onMounted(() => {
       <div class="graph-title">
         <h1>资金流向分析图</h1>
         <p class="graph-subtitle">
-          {{ nodes.length }} 个地址 · {{ edges.length }} 笔交易
+          {{ nodeCount }} 个地址 · {{ edgeCount }} 笔交易
         </p>
       </div>
       <div class="toolbar-right">
@@ -68,6 +89,7 @@ onMounted(() => {
           <span class="switch-label">显示隐藏节点</span>
         </label>
         <button class="log-btn" @click="logVisibleNodes">输出节点</button>
+        <button class="log-btn" @click="handleAddElement">批量添加节点</button>
         <LayoutToggle
           :current-layout="currentLayout"
           :is-transitioning="isTransitioning"

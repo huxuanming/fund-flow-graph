@@ -22,13 +22,13 @@ function amountToLineWidth(amount: number): number {
   return 1 + ratio * 5
 }
 
-const LAYOUT_CONFIG = {
+  const LAYOUT_CONFIG = {
   dagre: {
     type: 'dagre',
     rankdir: 'LR',
     controlPoints: true,
     nodesep: 50,
-    ranksep: 180,
+    ranksep: 200,
     nodeSize: [260, 60],
   },
   circular: {
@@ -44,11 +44,9 @@ export function useFundFlowGraph() {
 
   let graphInstance: Graph | null = null
 
-  // 折叠状态：key 格式为 `${nodeId}:left` 或 `${nodeId}:right`
-  const collapsedSet = new Set<string>()
-
   // 当前高亮的边 ID 列表
   let highlightedEdgeIds: string[] = []
+  let hoveredNodeId: string | null = null
 
   // 数据中 hidden:true 的节点 ID（初始隐藏集合）
   let initiallyHiddenIds: string[] = []
@@ -59,75 +57,7 @@ export function useFundFlowGraph() {
   const LOCAL_NODE_H = 56
   const LOCAL_COLLIDE_PAD_X = 18
   const LOCAL_COLLIDE_PAD_Y = 12
-
-  // ── 折叠/展开 ──────────────────────────────────────────
-
-  function getAllDescendants(
-    rootId: string,
-    side: 'left' | 'right',
-  ): { nodeIds: string[]; edgeIds: string[] } {
-    if (!graphInstance) return { nodeIds: [], edgeIds: [] }
-
-    const visitedNodes = new Set<string>()
-    const allNodeIds: string[] = []
-    const queue: string[] = [rootId]
-
-    while (queue.length > 0) {
-      const currentId = queue.shift()!
-      const currentData = graphInstance.getNodeData(currentId)
-      const currentLevel = (currentData?.data?.level as number) ?? 0
-      const relatedEdges = graphInstance.getRelatedEdgesData(currentId, 'both')
-
-      for (const edge of relatedEdges) {
-        const neighborId = (edge.source === currentId ? edge.target : edge.source) as string
-        const neighborData = graphInstance.getNodeData(neighborId)
-        const neighborLevel = (neighborData?.data?.level as number) ?? 0
-        const neighborDirection = neighborData?.data?.direction as string
-
-        if (
-          neighborLevel > currentLevel &&
-          neighborDirection === side &&
-          !visitedNodes.has(neighborId)
-        ) {
-          visitedNodes.add(neighborId)
-          allNodeIds.push(neighborId)
-          queue.push(neighborId)
-        }
-      }
-    }
-
-    const hiddenSet = new Set(allNodeIds)
-    const allEdgeIds = graphInstance
-      .getEdgeData()
-      .filter(e => hiddenSet.has(e.source as string) || hiddenSet.has(e.target as string))
-      .map(e => e.id as string)
-      .filter(Boolean)
-
-    return { nodeIds: allNodeIds, edgeIds: allEdgeIds }
-  }
-
-  async function toggleCollapse(nodeId: string, side: 'left' | 'right') {
-    if (!graphInstance) return
-    const key = `${nodeId}:${side}`
-    const isCollapsed = collapsedSet.has(key)
-    const { nodeIds, edgeIds } = getAllDescendants(nodeId, side)
-    if (nodeIds.length === 0) return
-
-    if (isCollapsed) {
-      collapsedSet.delete(key)
-      await graphInstance.showElement([...nodeIds, ...edgeIds])
-      await syncEdgeVisibility()
-    } else {
-      collapsedSet.add(key)
-      await graphInstance.hideElement([...nodeIds, ...edgeIds])
-    }
-
-    const dataUpdate = side === 'left'
-      ? { collapsedLeft: !isCollapsed }
-      : { collapsedRight: !isCollapsed }
-    graphInstance.updateNodeData([{ id: nodeId, data: dataUpdate }])
-    await graphInstance.draw()
-  }
+  let dynamicNodeSeq = 0
 
   // ── 隐藏节点 ──────────────────────────────────────────
 
@@ -185,36 +115,56 @@ export function useFundFlowGraph() {
 
   // ── 突出源点关联 ───────────────────────────────────────
 
-  function findPathToCenter(nodeId: string): string[] {
+  function findPathsToCenter(nodeId: string): string[] {
     if (!graphInstance) return []
-    const allEdges = graphInstance.getEdgeData()
-    const result: string[] = []
-    let currentId = nodeId
 
-    for (let i = 0; i < 5; i++) {
-      const currentData = graphInstance.getNodeData(currentId)
-      const currentLevel = (currentData?.data?.level as number) ?? 0
-      if (currentLevel === 0) break
+    const memo = new Map<string, boolean>()
+    const visiting = new Set<string>()
+    const edgeIds = new Set<string>()
 
-      const parentEdge = allEdges.find(e => {
-        if (e.source !== currentId && e.target !== currentId) return false
-        const neighborId = (e.source === currentId ? e.target : e.source) as string
+    const dfs = (currentId: string): boolean => {
+      const cached = memo.get(currentId)
+      if (cached !== undefined) return cached
+
+      const currentLevel = (graphInstance!.getNodeData(currentId)?.data?.level as number) ?? 0
+      if (currentLevel === 0) {
+        memo.set(currentId, true)
+        return true
+      }
+
+      if (visiting.has(currentId)) return false
+      visiting.add(currentId)
+
+      let canReachCenter = false
+      const relatedEdges = graphInstance!.getRelatedEdgesData(currentId, 'both')
+
+      for (const edge of relatedEdges) {
+        const neighborId = (edge.source === currentId ? edge.target : edge.source) as string
         const neighborLevel = (graphInstance!.getNodeData(neighborId)?.data?.level as number) ?? 0
-        return neighborLevel < currentLevel
-      })
-      if (!parentEdge?.id) break
 
-      result.push(parentEdge.id as string)
-      currentId = (parentEdge.source === currentId ? parentEdge.target : parentEdge.source) as string
+        // 仅沿“更接近源点”的方向回溯
+        if (neighborLevel >= currentLevel) continue
+
+        if (dfs(neighborId)) {
+          if (edge.id) edgeIds.add(edge.id as string)
+          canReachCenter = true
+        }
+      }
+
+      visiting.delete(currentId)
+      memo.set(currentId, canReachCenter)
+      return canReachCenter
     }
-    return result
+
+    dfs(nodeId)
+    return Array.from(edgeIds)
   }
 
   async function clearHighlight() {
     if (!graphInstance || highlightedEdgeIds.length === 0) return
-    for (const id of highlightedEdgeIds) {
-      await graphInstance.setElementState(id, [])
-    }
+    const clearStates: Record<string, string[]> = {}
+    for (const id of highlightedEdgeIds) clearStates[id] = []
+    await graphInstance.setElementState(clearStates, false)
     highlightedEdgeIds = []
   }
 
@@ -222,12 +172,12 @@ export function useFundFlowGraph() {
     if (!graphInstance) return
     await clearHighlight()
 
-    const edgeIds = findPathToCenter(nodeId)
+    const edgeIds = findPathsToCenter(nodeId)
     if (edgeIds.length === 0) return
 
-    for (const id of edgeIds) {
-      await graphInstance.setElementState(id, 'highlighted')
-    }
+    const nextStates: Record<string, string[]> = {}
+    for (const id of edgeIds) nextStates[id] = ['highlighted']
+    await graphInstance.setElementState(nextStates, false)
     highlightedEdgeIds = edgeIds
   }
 
@@ -267,13 +217,16 @@ export function useFundFlowGraph() {
           },
         },
         style: {
+          lineDash: [7, 5],
+          shadowColor: 'transparent',
+          shadowBlur: 0,
           endArrow: true,
-          endArrowType: 'vee',
-          endArrowFill: '#22d3ee',
+          // endArrowType: 'vee',
+          endArrowFill: '#f00',
           endArrowStroke: '#22d3ee',
           lineWidth: (d: any) => amountToLineWidth(d.data?.amount ?? 0),
           endArrowSize: (d: any) => 6 + amountToLineWidth(d.data?.amount ?? 0),
-          endArrowOffset: (d: any) => 0 + amountToLineWidth(d.data?.amount ?? 0),
+          endArrowOffset: 0, // (d: any) => amountToLineWidth(d.data?.amount ?? 0),
           startLabelText: (d: any) => {
             if (d.__direction === 'left') {
               const amount = d.data.amount
@@ -372,15 +325,42 @@ export function useFundFlowGraph() {
       container.style.visibility = ''
     })
 
-    // +/- 折叠按钮点击
+    // +/- 节点操作按钮点击：+ 新增子节点，- 隐藏当前节点
     graphInstance.on('node:click', async (event: any) => {
       if (event.targetType !== 'node') return
       const shapeName: string = event.originalTarget?.className ?? ''
-      if (shapeName === 'toggle-btn-right-bg') {
-        await toggleCollapse(event.target.id as string, 'right')
-      } else if (shapeName === 'toggle-btn-left-bg') {
-        await toggleCollapse(event.target.id as string, 'left')
+      if (shapeName === 'toggle-btn-right-plus-bg') {
+        await addRandomChildNode(event.target.id as string, 'right')
+      } else if (shapeName === 'toggle-btn-left-plus-bg') {
+        await addRandomChildNode(event.target.id as string, 'left')
+      } else if (shapeName === 'toggle-btn-left-minus-bg' || shapeName === 'toggle-btn-right-minus-bg') {
+        await hideNode(event.target.id as string)
       }
+    })
+
+    graphInstance.on('node:pointerenter', async (event: any) => {
+      const nodeId = event.target?.id as string | undefined
+      if (!nodeId || !graphInstance) return
+
+      const updates: Array<{ id: string; style: Record<string, any> }> = []
+      if (hoveredNodeId && hoveredNodeId !== nodeId) {
+        updates.push({ id: hoveredNodeId, style: { showToggleControls: false } })
+      }
+      updates.push({ id: nodeId, style: { showToggleControls: true } })
+      hoveredNodeId = nodeId
+
+      graphInstance.updateNodeData(updates as any)
+      await graphInstance.draw()
+    })
+
+    graphInstance.on('node:pointerleave', async (event: any) => {
+      const nodeId = event.target?.id as string | undefined
+      if (!nodeId || !graphInstance) return
+      if (hoveredNodeId !== nodeId) return
+
+      hoveredNodeId = null
+      graphInstance.updateNodeData([{ id: nodeId, style: { showToggleControls: false } }] as any)
+      await graphInstance.draw()
     })
 
     // 右键菜单
@@ -427,18 +407,20 @@ export function useFundFlowGraph() {
       if (!edgeId) continue
       const srcStyle = graphInstance.getElementRenderStyle(edge.source as string) as any
       const tgtStyle = graphInstance.getElementRenderStyle(edge.target as string) as any
+      const edgeStyle = graphInstance.getElementRenderStyle(edgeId) as any
       const srcHidden = srcStyle?.visibility === 'hidden'
       const tgtHidden = tgtStyle?.visibility === 'hidden'
+      const edgeHidden = edgeStyle?.visibility === 'hidden'
 
       if (srcHidden || tgtHidden) {
-        toHide.push(edgeId)
+        if (!edgeHidden) toHide.push(edgeId)
       } else {
-        toShow.push(edgeId)
+        if (edgeHidden) toShow.push(edgeId)
       }
     }
 
-    if (toHide.length) await graphInstance.hideElement(toHide)
-    if (toShow.length) await graphInstance.showElement(toShow)
+    if (toHide.length) await graphInstance.hideElement(toHide, false)
+    if (toShow.length) await graphInstance.showElement(toShow, false)
   }
 
   function getNodeLevel(nodeId: string): number {
@@ -746,13 +728,280 @@ export function useFundFlowGraph() {
     await syncEdgeVisibility()
   }
 
+  function getRankGapByLayout(): number {
+    const cfg = LAYOUT_CONFIG[currentLayout.value] as any
+    const layoutRanksep = typeof cfg?.ranksep === 'number' ? cfg.ranksep : LOCAL_RANK_GAP
+    // 新增子节点中心点偏移 = 布局间隔 + 节点半宽
+    return layoutRanksep + LOCAL_NODE_W
+  }
+
+  async function addRandomChildNode(parentId: string, forcedSide?: 'left' | 'right', batchCount = 5) {
+    if (!graphInstance) return null
+    const parentData = graphInstance.getNodeData(parentId)
+    if (!parentData?.id) return null
+
+    const parentDirection = (parentData.data?.direction as string) ?? 'center'
+    const side: 'left' | 'right' =
+      forcedSide ??
+      (parentDirection === 'center'
+        ? (Math.random() < 0.5 ? 'left' : 'right')
+        : (parentDirection === 'left' ? 'left' : 'right'))
+
+    const parentLevel = (parentData.data?.level as number) ?? 0
+    const childLevel = parentLevel + 1
+    const rankGap = getRankGapByLayout()
+    const parentPos = graphInstance.getElementPosition(parentId) as [number, number]
+    // 子节点 x 固定按布局间隔（ranksep）偏移
+    const targetX = parentPos[0] + (side === 'right' ? rankGap : -rankGap)
+
+    const occupiedY = graphInstance
+      .getNodeData()
+      .filter(n => n.id !== parentId && n.data?.direction === side && ((n.data?.level as number) ?? 0) === childLevel)
+      .filter(n => {
+        const style = graphInstance!.getElementRenderStyle(n.id as string) as any
+        return style?.visibility !== 'hidden'
+      })
+      .map(n => (graphInstance!.getElementPosition(n.id as string) as [number, number])[1])
+
+    const snap = (v: number) => Math.round(v / LOCAL_NODE_GAP) * LOCAL_NODE_GAP
+    const baseY = snap(parentPos[1])
+    const minGap = LOCAL_NODE_GAP * 0.9
+    const isAvailable = (y: number) => occupiedY.every(oy => Math.abs(oy - y) >= minGap)
+    const pickAvailableY = () => {
+      let y = baseY
+      if (!isAvailable(y)) {
+        for (let i = 1; i <= 80; i++) {
+          const down = baseY + i * LOCAL_NODE_GAP
+          if (isAvailable(down)) return down
+          const up = baseY - i * LOCAL_NODE_GAP
+          if (isAvailable(up)) return up
+        }
+      }
+      return y
+    }
+
+    const count = Math.max(1, Math.floor(batchCount))
+    const ts = Date.now()
+    const nodesToAdd: any[] = []
+    const edgesToAdd: any[] = []
+    const targetPositions: Record<string, [number, number]> = {}
+    const addedNodeIds: string[] = []
+    // 入场起点改为父节点附近，实现“从父节点发散”
+    const startX = parentPos[0]
+    const startY = parentPos[1]
+
+    for (let i = 0; i < count; i++) {
+      const targetY = pickAvailableY()
+      occupiedY.push(targetY)
+
+      dynamicNodeSeq += 1
+      const nodeId = `added-node-${ts}-${dynamicNodeSeq}`
+      const edgeId = `added-edge-${ts}-${dynamicNodeSeq}`
+
+      nodesToAdd.push({
+        id: nodeId,
+        style: {
+          x: startX,
+          y: startY,
+          size: [LOCAL_NODE_W, LOCAL_NODE_H],
+        },
+        data: {
+          address: `新增地址-${dynamicNodeSeq}`,
+          direction: side,
+          level: childLevel,
+          labelType: 0,
+          riskScore: 0,
+          label: '新增子节点',
+          hidden: false,
+        },
+      })
+      addedNodeIds.push(nodeId)
+
+      edgesToAdd.push(side === 'right'
+        ? {
+            id: edgeId,
+            source: parentId,
+            target: nodeId,
+            __direction: 'right',
+            data: {
+              amount: 10000 + dynamicNodeSeq * 1000,
+              txCount: 1,
+              transferTime: new Date().toISOString().slice(0, 19).replace('T', ' '),
+            },
+          }
+        : {
+            id: edgeId,
+            source: nodeId,
+            target: parentId,
+            __direction: 'left',
+            data: {
+              amount: 10000 + dynamicNodeSeq * 1000,
+              txCount: 1,
+              transferTime: new Date().toISOString().slice(0, 19).replace('T', ' '),
+            },
+          })
+
+      targetPositions[nodeId] = [targetX, targetY]
+    }
+
+    const parentStyle = graphInstance.getElementRenderStyle(parentId) as any
+    const parentOriginalZ = Number.isFinite(parentStyle?.zIndex) ? Number(parentStyle.zIndex) : 0
+    const tempParentZ = 9999
+    const tempChildZ = parentOriginalZ - 1
+
+    await graphInstance.setElementZIndex(parentId, tempParentZ)
+    for (const node of nodesToAdd) {
+      node.style = {
+        ...(node.style || {}),
+        zIndex: tempChildZ,
+      }
+    }
+
+    graphInstance.addNodeData(nodesToAdd as any)
+    await graphInstance.draw()
+    await graphInstance.translateElementTo(targetPositions, true)
+    await graphInstance.setElementZIndex({
+      [parentId]: parentOriginalZ,
+      ...Object.fromEntries(addedNodeIds.map(id => [id, 0])),
+    })
+
+    graphInstance.addEdgeData(edgesToAdd as any)
+    await graphInstance.draw()
+    await syncEdgeVisibility()
+
+    return { addedCount: count }
+  }
+
+  async function addElementToCanvas(batchCount = 3) {
+    if (!graphInstance) return null
+
+    const centerNode =
+      graphInstance.getNodeData().find(n => n.data?.direction === 'center') ??
+      graphInstance.getNodeData()[0]
+    if (!centerNode?.id) return null
+
+    const centerPos = graphInstance.getElementPosition(centerNode.id as string) as [number, number]
+    const snap = (v: number) => Math.round(v / LOCAL_NODE_GAP) * LOCAL_NODE_GAP
+    const baseY = snap(centerPos[1])
+    const minGap = LOCAL_NODE_GAP * 0.9
+
+    const collectSideVisibleLevel1Nodes = (side: 'left' | 'right') =>
+      graphInstance!
+        .getNodeData()
+        .filter(n => n.id !== centerNode.id && n.data?.direction === side && ((n.data?.level as number) ?? 0) === 1)
+        .filter(n => {
+          const style = graphInstance!.getElementRenderStyle(n.id as string) as any
+          return style?.visibility !== 'hidden'
+        })
+
+    const rightNodes = collectSideVisibleLevel1Nodes('right')
+    const leftNodes = collectSideVisibleLevel1Nodes('left')
+    const rightOccupiedY = rightNodes.map(n => (graphInstance!.getElementPosition(n.id as string) as [number, number])[1])
+    const leftOccupiedY = leftNodes.map(n => (graphInstance!.getElementPosition(n.id as string) as [number, number])[1])
+
+    // 新增节点优先对齐同侧子节点现有 x 轴（若存在）。
+    const pickTargetX = (side: 'left' | 'right') => {
+      const sameSideNodes = side === 'right' ? rightNodes : leftNodes
+      const fallbackX = centerPos[0] + (side === 'right' ? LOCAL_RANK_GAP : -LOCAL_RANK_GAP)
+      return sameSideNodes.length > 0
+        ? (graphInstance!.getElementPosition(sameSideNodes[0].id as string) as [number, number])[0]
+        : fallbackX
+    }
+
+    const pickAvailableY = (occupiedY: number[]) => {
+      const isAvailable = (y: number) => occupiedY.every(oy => Math.abs(oy - y) >= minGap)
+      if (isAvailable(baseY)) return baseY
+      for (let i = 1; i <= 80; i++) {
+        const down = baseY + i * LOCAL_NODE_GAP
+        if (isAvailable(down)) return down
+        const up = baseY - i * LOCAL_NODE_GAP
+        if (isAvailable(up)) return up
+      }
+      return baseY
+    }
+
+    const ts = Date.now()
+    const nodesToAdd: any[] = []
+    const edgesToAdd: any[] = []
+    const targetPositions: Record<string, [number, number]> = {}
+    const nodeIds: string[] = []
+    const edgeIds: string[] = []
+    const count = Math.max(1, Math.floor(batchCount))
+
+    for (let i = 0; i < count; i++) {
+      dynamicNodeSeq += 1
+      const side: 'left' | 'right' = dynamicNodeSeq % 2 === 0 ? 'left' : 'right'
+      const nodeId = `added-node-${ts}-${dynamicNodeSeq}`
+      const edgeId = `added-edge-${ts}-${dynamicNodeSeq}`
+      const targetX = pickTargetX(side)
+      const occupiedY = side === 'right' ? rightOccupiedY : leftOccupiedY
+      const targetY = pickAvailableY(occupiedY)
+      occupiedY.push(targetY)
+
+      const startX = targetX + (side === 'right' ? 260 : -260)
+      nodesToAdd.push({
+        id: nodeId,
+        style: {
+          x: startX,
+          y: targetY,
+          size: [LOCAL_NODE_W, LOCAL_NODE_H],
+        },
+        data: {
+          address: `新增地址-${dynamicNodeSeq}`,
+          direction: side,
+          level: 1,
+          labelType: 0,
+          riskScore: 0,
+          label: '新增节点',
+          hidden: false,
+        },
+      })
+
+      edgesToAdd.push(side === 'right'
+        ? {
+            id: edgeId,
+            source: centerNode.id as string,
+            target: nodeId,
+            __direction: 'right',
+            data: {
+              amount: 10000 + dynamicNodeSeq * 1000,
+              txCount: 1,
+              transferTime: new Date().toISOString().slice(0, 19).replace('T', ' '),
+            },
+          }
+        : {
+            id: edgeId,
+            source: nodeId,
+            target: centerNode.id as string,
+            __direction: 'left',
+            data: {
+              amount: 10000 + dynamicNodeSeq * 1000,
+              txCount: 1,
+              transferTime: new Date().toISOString().slice(0, 19).replace('T', ' '),
+            },
+          })
+      targetPositions[nodeId] = [targetX, targetY]
+      nodeIds.push(nodeId)
+      edgeIds.push(edgeId)
+    }
+
+    graphInstance.addNodeData(nodesToAdd)
+    await graphInstance.draw()
+    await graphInstance.translateElementTo(targetPositions, true)
+    graphInstance.addEdgeData(edgesToAdd)
+    await graphInstance.draw()
+    await syncEdgeVisibility()
+
+    return { nodeIds, edgeIds, addedCount: count }
+  }
+
   function destroyGraph() {
     if (graphInstance) {
       graphInstance.destroy()
       graphInstance = null
     }
-    collapsedSet.clear()
     highlightedEdgeIds = []
+    hoveredNodeId = null
     initiallyHiddenIds = []
   }
 
@@ -768,5 +1017,6 @@ export function useFundFlowGraph() {
     logVisibleNodes,
     showHiddenNodes,
     toggleHiddenNodes,
+    addElementToCanvas,
   }
 }
